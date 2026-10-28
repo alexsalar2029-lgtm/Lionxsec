@@ -39,11 +39,11 @@ def run():
                     assert page.locator('html').get_attribute('lang') == language
                     assert page.locator('html').get_attribute('dir') == direction
                     assert page.locator('.product-card').count() == 6
-                page.screenshot(path='/workspace/LionXsec-Shop-v1.1-desktop.png', full_page=True)
-                page.screenshot(path='/workspace/LionXsec-Shop-v1.1-preview.png', full_page=False)
+                page.screenshot(path='/workspace/LionXsec-Shop-v1.2-desktop.png', full_page=True)
+                page.screenshot(path='/workspace/LionXsec-Shop-v1.2-preview.png', full_page=False)
                 page.set_viewport_size({'width':390,'height':844})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-                page.screenshot(path='/workspace/LionXsec-Shop-v1.1-mobile.png', full_page=True)
+                page.screenshot(path='/workspace/LionXsec-Shop-v1.2-mobile.png', full_page=True)
                 page.set_viewport_size({'width':1440,'height':1000})
                 page.locator('.language').select_option('en')
                 first=page.locator('.product-card').first

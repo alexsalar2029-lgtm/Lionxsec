@@ -19,7 +19,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit, unquote, parse_qs
+from content import ResourceStoreMixin, ContentError, LIMITS
 
 ROOT = Path(__file__).resolve().parent
 LANGS = ("fa", "en", "ar", "es")
@@ -126,7 +127,7 @@ def password_matches(password, stored):
     return hmac.compare_digest(password_hash(password, salt), stored)
 
 
-class Store:
+class Store(ResourceStoreMixin):
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -160,6 +161,7 @@ class Store:
             self.path.chmod(0o600)
         except OSError:
             pass
+        self.init_content()
 
     @contextlib.contextmanager
     def db(self):
@@ -199,10 +201,14 @@ class Store:
         p = {"id": pid or secrets.token_hex(8), "name": localized(data.get("name")),
              "duration": localized(data.get("duration")), "delivery": localized(data.get("delivery")),
              "price_cents": money_cents(data.get("price")), "category": data.get("category", "work"),
-             "active": data.get("active", True), "brand": data.get("brand", "generic"), "demo": False}
+             "active": data.get("active", True), "brand": data.get("brand", "generic"),
+             "logo_id": data.get("logo_id") or None, "demo": False}
         if p["category"] not in ("work", "creative", "learning", "other") or type(p["active"]) is not bool or p["brand"] not in BRANDS:
             raise Problem("invalid_product")
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if p["logo_id"]:
+                self.media_record(p["logo_id"], "logo", db)
             if pid and not db.execute("SELECT 1 FROM products WHERE id=?", (pid,)).fetchone():
                 raise Problem("not_found", 404)
             if pid:
@@ -352,7 +358,7 @@ class App(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "LionXsecShop/1.1"
+    server_version = "LionXsecShop/1.2"
 
     def log_message(self, fmt, *args):
         # Public order tokens, credentials and order details never enter access logs.
@@ -367,13 +373,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         if self.server.origin.startswith("https:"):
             self.send_header("Strict-Transport-Security", "max-age=31536000")
         for key, val in (headers or {}).items():
             self.send_header(key, val)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != 'HEAD':
+            self.wfile.write(body)
 
     def body(self):
         if self.headers.get("Content-Type", "").split(";", 1)[0].strip() != "application/json":
@@ -429,6 +436,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send({"ok": True})
             if path == "/api/catalog":
                 return self.send(self.server.store.catalog())
+            if path == "/api/resources":
+                return self.send({"resources": self.server.store.resources()})
+            if path.startswith('/media/'):
+                return self.serve_media(path.removeprefix('/media/'))
             if path.startswith("/api/orders/"):
                 return self.send(self.server.store.order(path.removeprefix("/api/orders/")))
             if path == "/api/admin/me":
@@ -437,12 +448,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/admin/catalog":
                 self.session()
                 return self.send(self.server.store.catalog(True))
+            if path == "/api/admin/resources":
+                self.session()
+                return self.send({"resources":self.server.store.resources(True)})
+            if path == "/api/admin/uploads":
+                self.session()
+                return self.send({"uploads":self.server.store.media_list()})
             if path == "/api/admin/orders":
                 self.session()
                 with self.server.store.db() as db:
                     orders = [json.loads(r[0]) for r in db.execute("SELECT value FROM orders ORDER BY created DESC,rowid DESC LIMIT 500")]
                 return self.send({"orders": orders})
-            files = {"/": "index.html", "/admin": "admin.html", "/app.js": "app.js",
+            files = {"/": "index.html", "/admin": "admin.html", "/app.js": "app.js", "/content.js": "content.js", "/content-admin.js": "content-admin.js",
                      "/admin.js": "admin.js", "/shared.js": "shared.js", "/styles.css": "styles.css",
                      "/theme.css": "theme.css", "/favicon.svg": "favicon.svg"}
             assets = {f"{brand}.svg" for brand in BRANDS if brand != "generic"} | {"lion-mark.svg", "lion-hero.png"}
@@ -453,10 +470,76 @@ class Handler(BaseHTTPRequestHandler):
             kinds = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                      ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
             return self.send(file.read_bytes(), kind=kinds[file.suffix])
-        except Problem as e:
+        except (Problem, ContentError) as e:
             self.send({"error": e.code}, e.status)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def serve_media(self, mid):
+        row = self.server.store.media_record(mid)
+        path = self.server.store.media_dir / row['filename']
+        if not path.is_file():
+            raise ContentError('media_not_found',404)
+        size, start = path.stat().st_size, 0
+        end, status = size-1, 200
+        requested = self.headers.get('Range')
+        if requested:
+            match = re.fullmatch(r'bytes=(\d*)-(\d*)',requested) if len(requested)<128 else None
+            if not match or not any(match.groups()):
+                return self.send(b'',416,{'Content-Range':f'bytes */{size}'},row['mime'])
+            left,right=match.groups()
+            if left:
+                start=int(left);end=min(int(right),size-1) if right else size-1
+            else:
+                count=int(right);start=max(0,size-count)
+                if count == 0:
+                    return self.send(b'',416,{'Content-Range':f'bytes */{size}'},row['mime'])
+            if start>=size or end<start:
+                return self.send(b'',416,{'Content-Range':f'bytes */{size}'},row['mime'])
+            status=206
+        self.send_response(status)
+        self.send_header('Content-Type',row['mime'])
+        self.send_header('Content-Length',str(end-start+1))
+        self.send_header('Accept-Ranges','bytes')
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('Content-Security-Policy',"default-src 'none'; sandbox")
+        self.send_header('Cache-Control','public, max-age=3600')
+        if status==206:
+            self.send_header('Content-Range',f'bytes {start}-{end}/{size}')
+        self.end_headers()
+        if self.command=='HEAD':
+            return
+        with path.open('rb') as file:
+            file.seek(start)
+            remaining=end-start+1
+            while remaining:
+                chunk=file.read(min(65536,remaining))
+                if not chunk:break
+                self.wfile.write(chunk);remaining-=len(chunk)
+
+    def receive_upload(self):
+        self.session(mutation=True)
+        kind=parse_qs(urlsplit(self.path).query).get('kind',[''])[0]
+        try:
+            length=int(self.headers.get('Content-Length','0'))
+        except ValueError:
+            raise ContentError('invalid_request') from None
+        if kind not in LIMITS:
+            raise ContentError('invalid_upload_kind')
+        if not 1<=length<=LIMITS[kind] or self.headers.get('Transfer-Encoding'):
+            raise ContentError('upload_too_large',413)
+        previous=self.connection.gettimeout()
+        self.connection.settimeout(30)
+        try:
+            result=self.server.store.upload(self.rfile,kind,length,unquote(self.headers.get('X-Upload-Name','upload')))
+        except TimeoutError:
+            raise ContentError('upload_timeout',408) from None
+        finally:
+            self.connection.settimeout(previous)
+        return self.send(result,201)
 
     def do_POST(self):
         self.mutate("POST")
@@ -471,6 +554,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.check_origin()
             path = urlsplit(self.path).path
+            if path=='/api/admin/uploads' and method=='POST':
+                return self.receive_upload()
             data = self.body()
             store = self.server.store
             if path == "/api/admin/login" and method == "POST":
@@ -495,6 +580,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(store.create_order(data), 201)
             if path.startswith("/api/admin/"):
                 session = self.session(mutation=True)
+                if path=='/api/admin/resources' and method=='POST':
+                    return self.send(store.save_resource(data),201)
+                if path.startswith('/api/admin/resources/'):
+                    rid=path.removeprefix('/api/admin/resources/')
+                    if method=='PUT':return self.send(store.save_resource(data,rid))
+                    if method=='DELETE':
+                        store.delete_resource(rid)
+                        return self.send({'ok':True})
+                if path.startswith('/api/admin/uploads/') and method=='DELETE':
+                    store.delete_media(path.removeprefix('/api/admin/uploads/'))
+                    return self.send({'ok':True})
                 if path == "/api/admin/logout" and method == "POST":
                     with store.db() as db:
                         db.execute("DELETE FROM sessions WHERE token=?", (session["token"],))
@@ -518,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith(prefix) and method == "PUT":
                     return self.send(store.update_order(path[len(prefix):], data))
             raise Problem("not_found", 404)
-        except Problem as e:
+        except (Problem, ContentError) as e:
             self.send({"error": e.code}, e.status)
         except (BrokenPipeError, ConnectionResetError):
             pass

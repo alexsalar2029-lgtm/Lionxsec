@@ -1,17 +1,20 @@
-import {BRANDS, brandFor, brandLogo, LANGS, LANGUAGE_NAMES, api, t, esc, name, amount, date, lang, setupLanguage, toast, icon} from './shared.js';
+import {BRANDS, brandFor, brandLogo, productLogo, copyTranslations, uploadFile, LANGS, LANGUAGE_NAMES, api, t, esc, name, amount, date, lang, setupLanguage, toast, icon} from './shared.js';
+import {ContentAdmin} from './content-admin.js';
 let csrf='', catalog={products:[],settings:{}}, orders=[], tab='products', editLanguage='fa';
 const $=id=>document.getElementById(id);
+const contentAdmin=new ContentAdmin({csrf:()=>csrf,active:()=>tab});
 const mutate=(path,method,data)=>api(path,{method,headers:{'X-CSRF-Token':csrf},body:JSON.stringify(data)});
 async function load() {
  [catalog,{orders}]=await Promise.all([api('/api/admin/catalog'),api('/api/admin/orders')]);render();
 }
 function render() {
- $('admin-tabs').innerHTML=['products','wallets','orders'].map(key=>`<button class="filter ${tab===key?'selected':''}" data-tab="${key}" aria-pressed="${tab===key}">${esc(t(key))}${key==='orders'?` <span class="count">${orders.length}</span>`:''}</button>`).join('');
+ $('admin-tabs').innerHTML=['products','wallets','orders','tutorials','tools','uploads'].map(key=>`<button class="filter ${tab===key?'selected':''}" data-tab="${key}" aria-pressed="${tab===key}">${esc(t(key))}${key==='orders'?` <span class="count">${orders.length}</span>`:''}</button>`).join('');
  if(tab==='products')renderProducts(); if(tab==='wallets')renderWallets(); if(tab==='orders')renderOrders();
+ if(['tutorials','tools','uploads'].includes(tab))contentAdmin.render(tab).catch(err=>toast(err.message,true));
 }
 function renderProducts() {
  $('admin-content').innerHTML=`<div class="admin-toolbar"><p class="muted">${esc(t('translations'))}</p><button class="button primary" id="new-product">${icon('plus')}${esc(t('newProduct'))}</button></div><div class="admin-product-list">${catalog.products.map(p=>`<article class="admin-product"><span class="cart-item-symbol" data-category="${p.category}">${icon(p.category)}</span><div class="grow"><h3>${esc(name(p.name))} ${p.demo?`<span class="demo-inline">${esc(t('demo'))}</span>`:''}</h3><p>${esc(name(p.duration))} · ${esc(name(p.delivery))}</p></div><strong dir="ltr">${amount(p.price_cents)} USDT</strong><span class="status-badge" data-status="${p.active?'paid':'cancelled'}">${esc(t(p.active?'active':'unavailable'))}</span><button class="button secondary" data-edit-product="${p.id}">${esc(t('edit'))}</button><button class="remove-button" data-delete-product="${p.id}">${esc(t('delete'))}</button></article>`).join('')}</div>`;
- document.querySelectorAll('.admin-product').forEach((row,i)=>{row.querySelector('.cart-item-symbol').innerHTML=brandLogo(brandFor(catalog.products[i]),'list-logo');});
+ document.querySelectorAll('.admin-product').forEach((row,i)=>{row.querySelector('.cart-item-symbol').innerHTML=productLogo(catalog.products[i],'list-logo');});
 }
 function renderWallets() {
  const s=catalog.settings;
@@ -31,12 +34,29 @@ function editProduct(pid) {
  $('edit-content').innerHTML=`<div class="dialog-heading"><h2>${esc(t(p?'edit':'newProduct'))}</h2><button class="icon-button" data-close aria-label="${esc(t('close'))}">${icon('close')}</button></div><p class="small muted">${esc(t('translations'))}</p><div class="translation-tabs">${LANGS.map(l=>`<button class="filter ${editLanguage===l?'selected':''}" data-edit-lang="${l}" type="button">${LANGUAGE_NAMES[l]}</button>`).join('')}</div><form id="product-form" data-pid="${pid||''}">${LANGS.map(l=>`<div data-language-fields="${l}" ${editLanguage!==l?'hidden':''}>${['name','duration','delivery'].map(key=>`<label class="field">${esc(t(key==='name'?'productName':key))} · ${LANGUAGE_NAMES[l]}<input name="${key}_${l}" lang="${l}" dir="${['fa','ar'].includes(l)?'rtl':'ltr'}" value="${esc(p?.[key]?.[l]||'')}" maxlength="250" aria-required="true"></label>`).join('')}</div>`).join('')}<div class="form-grid"><label class="field">${esc(t('price'))}<input type="number" name="price" min="0.01" max="100000" step="0.01" dir="ltr" value="${p?(p.price_cents/100).toFixed(2):''}" required></label><label class="field">${esc(t('category'))}<select name="category">${['work','creative','learning','other'].map(c=>`<option value="${c}" ${p?.category===c?'selected':''}>${esc(t(c))}</option>`).join('')}</select></label></div><label class="check-field"><input type="checkbox" name="active" ${p?.active!==false?'checked':''}>${esc(t('active'))}</label><p id="product-error" class="form-error" role="alert" hidden></p><div class="form-actions"><button type="submit" class="button primary">${esc(t('save'))}</button><button type="button" class="button secondary" data-close>${esc(t('cancel'))}</button></div></form>`;
  const brandField=document.createElement('label');
  brandField.className='field';
- brandField.innerHTML=`${esc(t('productLogo'))}<div class="brand-picker-preview">${brandLogo(brandFor(p),'picker-logo')}<select name="brand">${Object.entries(BRANDS).map(([key,label])=>`<option value="${key}" ${brandFor(p)===key?'selected':''}>${label}</option>`).join('')}</select></div>`;
+ brandField.innerHTML=`${esc(t('productLogo'))}<div class="brand-picker-preview">${productLogo(p,'picker-logo')}<select name="brand">${Object.entries(BRANDS).map(([key,label])=>`<option value="${key}" ${brandFor(p)===key?'selected':''}>${label}</option>`).join('')}</select></div><input type="hidden" name="logo_id" value="${esc(p?.logo_id||'')}"><span>${esc(t('uploadLogo'))}</span><input id="product-logo-file" type="file" accept="image/png,image/jpeg,image/webp"><small>${esc(t('logoHint'))}</small><button class="text-link" id="remove-custom-logo" type="button" ${p?.logo_id?'':'hidden'}>${esc(t('removeLogo'))}</button><progress id="logo-progress" max="100" value="0" hidden></progress>`;
  $('product-form').querySelector('.check-field').before(brandField);
- brandField.querySelector('select').addEventListener('change',e=>{brandField.querySelector('img').src='/assets/'+(e.target.value==='generic'?'lion-mark':e.target.value)+'.svg';brandField.querySelector('img').alt=BRANDS[e.target.value];});
+ const form=$('product-form');
+ const resetLogo=()=>{form.elements.logo_id.value='';brandField.querySelector('img').outerHTML=brandLogo(form.elements.brand.value,'picker-logo');$('remove-custom-logo').hidden=true;};
+ brandField.querySelector('select').addEventListener('change',resetLogo);
+ $('remove-custom-logo').addEventListener('click',resetLogo);
+ const copyButton=document.createElement('button');copyButton.type='button';copyButton.className='button secondary copy-translations';copyButton.textContent=t('copyTranslations');
+ form.prepend(copyButton);copyButton.addEventListener('click',()=>copyTranslations(form,['name','duration','delivery'],editLanguage));
+ const helper=document.createElement('p');helper.className='small muted';helper.textContent=t('productHelp');form.prepend(helper);
+ let pendingUpload=null;
+ $('product-logo-file').addEventListener('change',async e=>{
+  const file=e.target.files[0];if(!file)return;
+  if(file.size>3*1024**2){toast(t('errors').upload_too_large,true);return;}
+  const button=form.querySelector('[type=submit]'),progress=$('logo-progress');button.disabled=true;e.target.disabled=true;progress.hidden=false;
+  pendingUpload=uploadFile(file,'logo',csrf,n=>progress.value=n);
+  try{const media=await pendingUpload;form.elements.logo_id.value=media.id;brandField.querySelector('img').outerHTML=productLogo({logo_id:media.id,name:{en:file.name}},'picker-logo');$('remove-custom-logo').hidden=false;toast(t('uploadComplete'));}
+  catch(err){if($('edit-dialog').open)toast(err.message,true);}finally{pendingUpload=null;button.disabled=false;e.target.disabled=false;progress.hidden=true;}
+ });
+ $('edit-dialog').addEventListener('close',()=>pendingUpload?.abort(),{once:true});
  $('product-form').addEventListener('submit',async e=>{
   e.preventDefault();const form=e.currentTarget, f=new FormData(form),button=form.querySelector('[type=submit]');
-  const data={price:f.get('price'),category:f.get('category'),brand:f.get('brand'),active:f.get('active')==='on'};
+  if(pendingUpload)return;
+  const data={price:f.get('price'),category:f.get('category'),brand:f.get('brand'),logo_id:f.get('logo_id'),active:f.get('active')==='on'};
   for(const field of ['name','duration','delivery'])data[field]=Object.fromEntries(LANGS.map(l=>[l,f.get(field+'_'+l)]));
   button.disabled=true;
   try{await mutate('/api/admin/products'+(pid?'/'+pid:''),pid?'PUT':'POST',data);$('edit-dialog').close();await load();toast(t('saved'));}

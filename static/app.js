@@ -1,4 +1,5 @@
-import {BRANDS, brandFor, brandLogo, api, t, esc, name, amount, date, lang, setupLanguage, toast, copy, icon} from './shared.js';
+import {BRANDS, brandFor, brandLogo, productLogo, api, t, esc, name, amount, date, lang, setupLanguage, toast, copy, icon} from './shared.js';
+import {loadResources,renderResources} from './content.js';
 
 let catalog = {products:[],methods:[],settings:{}};
 let filter = 'all', search = '', currentOrder = null, submitting = false;
@@ -18,10 +19,10 @@ function renderProducts() {
  $('filters').innerHTML=['all','work','creative','learning','other'].map(c=>`<button data-filter="${c}" class="filter ${filter===c?'selected':''}" aria-pressed="${filter===c}">${esc(t(c))}</button>`).join('');
  const products=catalog.products.filter(p=>(filter==='all'||p.category===filter) && name(p.name).toLowerCase().includes(search.toLowerCase()));
  $('products').innerHTML=products.map((p,i)=>`<article class="product-card" data-category="${p.category}" data-brand="${brandFor(p)}">
-  <div class="product-art"><span class="product-symbol">${brandLogo(brandFor(p))}</span><span class="product-service-name" dir="ltr">${esc(BRANDS[brandFor(p)])}</span><span class="product-label">${esc(t(p.category))}</span>${p.demo?`<span class="demo-badge">${esc(t('demo'))}</span>`:''}</div>
+  <div class="product-art"><span class="product-symbol">${productLogo(p)}</span><span class="product-service-name" dir="ltr">${esc(p.logo_id?name(p.name):BRANDS[brandFor(p)])}</span><span class="product-label">${esc(t(p.category))}</span>${p.demo?`<span class="demo-badge">${esc(t('demo'))}</span>`:''}</div>
   <div class="product-body"><span class="duration">${esc(name(p.duration))}</span><h3>${esc(name(p.name))}</h3><p class="delivery-line">${icon('check')}${esc(name(p.delivery))}</p>
   <div class="product-bottom"><div><strong dir="ltr">${amount(p.price_cents)} <small>USDT</small></strong><span>${esc(t('each'))}</span></div><div class="quantity-control"><button data-qty="minus" data-id="${p.id}" aria-label="−">−</button><input type="number" min="5" max="10000" step="1" value="5" id="quantity-${p.id}" aria-label="${esc(t('quantity'))}"><button data-qty="plus" data-id="${p.id}" aria-label="+">+</button></div></div>
-  <button class="button add-button" data-add="${p.id}"><span>${esc(t('add'))}</span>${icon('plus')}</button></div></article>`).join('') || `<p class="empty-state">${esc(t('noResults'))}</p>`;
+  <div class="card-total"><span>${esc(t('subtotal'))}</span><strong data-product-total="${p.id}" dir="ltr">${amount(p.price_cents*5)} USDT</strong></div><p class="card-quantity-error small form-error" id="quantity-error-${p.id}" hidden>${esc(t('minimum'))}</p><button class="button add-button" data-add="${p.id}"><span>${esc(t('add'))}</span>${icon('plus')}</button></div></article>`).join('') || `<p class="empty-state">${esc(t('noResults'))}</p>`;
  $('preparing').hidden = catalog.methods.length>0 && catalog.products.some(p=>!p.demo);
  renderCount();
 }
@@ -29,6 +30,13 @@ function renderProducts() {
 function changeCardQty(pid, op) {
  const el=$('quantity-'+pid);
  el.value=Math.min(10000,Math.max(5,(Number(el.value)||5)+(op==='plus'?1:-1)));
+ updateCardTotal(pid);
+}
+function updateCardTotal(pid){
+ const product=catalog.products.find(p=>p.id===pid),input=$('quantity-'+pid);if(!product||!input)return;
+ const n=Number(input.value),valid=Number.isInteger(n)&&n>=5&&n<=10000;
+ input.setAttribute('aria-invalid',String(!valid));$('quantity-error-'+pid).hidden=valid;
+ document.querySelector(`[data-product-total="${pid}"]`).textContent=valid?amount(n*product.price_cents)+' USDT':'—';
 }
 function add(pid) {
  const quantity=Number($('quantity-'+pid).value);
@@ -44,6 +52,7 @@ function renderCart() {
  const rows=cartRows();
  $('cart-content').innerHTML=cartHeader()+ (rows.length ? `<div class="cart-items">${rows.map(x=>`<article class="cart-item"><div class="cart-item-symbol" data-category="${x.product.category}">${icon(x.product.category)}</div><div class="cart-item-copy"><h3>${esc(name(x.product.name))}</h3><p>${esc(name(x.product.duration))}</p><strong dir="ltr">${amount(x.product.price_cents)} USDT</strong></div><button class="remove-button" data-remove="${x.id}">${esc(t('remove'))}</button><div class="quantity-control"><button data-cart-qty="minus" data-id="${x.id}" aria-label="−">−</button><input data-cart-input="${x.id}" type="number" min="5" max="10000" step="1" value="${x.quantity}" aria-label="${esc(t('quantity'))}"><button data-cart-qty="plus" data-id="${x.id}" aria-label="+">+</button></div><strong class="item-total" dir="ltr">${amount(x.quantity*x.product.price_cents)} USDT</strong></article>`).join('')}</div><div class="cart-footer"><div class="total-row"><span>${esc(t('total'))}</span><strong dir="ltr">${amount(cartTotal())} USDT</strong></div><p class="muted">${esc(t('minimum'))}</p><button class="button primary full" id="checkout">${esc(t('checkout'))}${icon('arrow')}</button><p class="small muted">${esc(t('manual'))}</p></div>` : `<div class="empty-state">${icon('bag')}<p>${esc(t('empty'))}</p><button class="button primary" data-close="cart-dialog">${esc(t('browse'))}</button></div>`)
  + (localStorage.getItem('lx-order-token') ? `<button class="text-link previous-order" id="previous-order">${esc(t('previousOrder'))}</button>`:'');
+ document.querySelectorAll('.cart-item').forEach((el,i)=>{el.querySelector('.cart-item-symbol').innerHTML=productLogo(rows[i].product,'list-logo');});
 }
 
 function renderCheckout() {
@@ -99,11 +108,23 @@ document.addEventListener('change',e=>{
  if(!Number.isInteger(n)||n<5||n>10000){toast(t('minimum'),true);renderCart();return;}
  cart.find(x=>x.id===id).quantity=n;persist();renderCart();
 });
+document.addEventListener('input',e=>{
+ if(e.target.id.startsWith('quantity-')){updateCardTotal(e.target.id.slice('quantity-'.length));return;}
+ const pid=e.target.dataset.cartInput;if(!pid)return;
+ const n=Number(e.target.value),valid=Number.isInteger(n)&&n>=5&&n<=10000;
+ e.target.setAttribute('aria-invalid',String(!valid));
+ const checkout=$('checkout');if(checkout)checkout.disabled=![...document.querySelectorAll('[data-cart-input]')].every(el=>Number.isInteger(Number(el.value))&&Number(el.value)>=5&&Number(el.value)<=10000);
+ if(!valid)return;
+ const row=cart.find(x=>x.id===pid),product=catalog.products.find(p=>p.id===pid);if(!row||!product)return;
+ row.quantity=n;persist();e.target.closest('.cart-item').querySelector('.item-total').textContent=amount(n*product.price_cents)+' USDT';
+ document.querySelector('.cart-footer .total-row strong').textContent=amount(cartTotal())+' USDT';
+});
 $('cart-open').addEventListener('click',()=>{renderCart();$('cart-dialog').showModal();});
 $('search').addEventListener('input',e=>{search=e.target.value;renderProducts();});
-window.addEventListener('languagechange',()=>{renderProducts();if($('cart-dialog').open)renderCart();renderOrder();});
+window.addEventListener('languagechange',()=>{renderProducts();if($('cart-dialog').open)renderCart();renderOrder();renderResources();});
 for(const dialog of document.querySelectorAll('dialog')) dialog.addEventListener('click',e=>{if(e.target===dialog)dialog.close();});
 setInterval(()=>{if(currentOrder && $('order-dialog').open && Date.now()/1000>currentOrder.quote_expires && !document.querySelector('#order-content .warning'))renderOrder();},1000);
 setupLanguage();
 try {catalog=await api('/api/catalog');cart=cart.filter(x=>catalog.products.some(p=>p.id===x.id));persist();renderProducts();}
 catch(err){$('products').textContent=err.message;toast(err.message,true);}
+loadResources().catch(err=>toast(err.message,true));
